@@ -12,9 +12,8 @@
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
-    "body-parser": "^2.3.0",
+    "@upstash/redis": "^1.38.2",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1",
     "twilio": "^6.0.2"
   }
 }

@@ -1,17 +1,10 @@
-require('dotenv').config();
-const express = require('express');
-const bodyParser = require('body-parser');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
-
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+const { Redis } = require('@upstash/redis');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const redis = Redis.fromEnv(); // reads UPSTASH_REDIS_REST_URL / TOKEN automatically
 
-// Conversation state per WhatsApp number. In-memory = fine for a prototype,
-// swap for Redis before going to production (Step 8).
-const conversations = new Map();
 
 const SYSTEM_PROMPT = `Tu es un assistant qui aide un médecin très occupé à structurer un cas
 clinique avant une présentation à un spécialiste. Va droit au but, comme
@@ -78,47 +71,54 @@ nausées/vo, transit N, pas de signes urinaires, DDR J-5, examen
 abdo actuellement sans défense, TA/FC stables, pas de bio/imagerie
 faite.`;
 
-app.post('/webhook', async (req, res) => {
-  const from = req.body.From; // e.g. 'whatsapp:+33612345678'
-  const incomingMessage = (req.body.Body || '').trim();
 
-  if (!conversations.has(from)) {
-    conversations.set(from, []);
+module.exports = async (req, res) => {
+    if (req.method !== 'POST') {
+      return res.status(405).send('Method not allowed');
+    }
+  
+    const from = req.body.From;
+    const incomingMessage = (req.body.Body || '').trim();
+    const key = `conv:${from}`;
+  
+    if (incomingMessage.toLowerCase() === 'reset') {
+      await redis.del(key);
+      return sendReply(res, 'Conversation réinitialisée. Décris-moi le nouveau cas.');
+    }
+  
+    let history = (await redis.get(key)) || [];
+    history.push({ role: 'user', content: incomingMessage });
+  
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-5',
+        max_tokens: 700,
+        system: SYSTEM_PROMPT,
+        messages: history,
+      });
+  
+      const reply = response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+  
+      if (response.stop_reason === 'max_tokens') {
+        console.warn(`Réponse tronquée pour ${from}`);
+      }
+  
+      history.push({ role: 'assistant', content: reply });
+      await redis.set(key, history);
+  
+      sendReply(res, reply);
+    } catch (err) {
+      console.error(err);
+      sendReply(res, "Une erreur s'est produite, réessaie dans un instant.");
+    }
+  };
+  
+  function sendReply(res, text) {
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(text);
+    res.setHeader('Content-Type', 'text/xml');
+    res.status(200).send(twiml.toString());
   }
-
-  if (incomingMessage.toLowerCase() === 'reset') {
-    conversations.set(from, []);
-    return sendReply(res, 'Conversation réinitialisée. Décris-moi le nouveau cas.');
-  }
-
-  const history = conversations.get(from);
-  history.push({ role: 'user', content: incomingMessage });
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 1000,
-      system: SYSTEM_PROMPT,
-      messages: history,
-    });
-
-    const reply = response.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n');
-
-    history.push({ role: 'assistant', content: reply });
-    sendReply(res, reply);
-  } catch (err) {
-    console.error(err);
-    sendReply(res, "Une erreur s'est produite, réessaie dans un instant.");
-  }
-});
-
-function sendReply(res, text) {
-  const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(text);
-  res.type('text/xml').send(twiml.toString());
-}
-
-app.listen(3000, () => console.log('Webhook listening on port 3000'));
