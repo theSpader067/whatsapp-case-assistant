@@ -115,3 +115,10 @@ module.exports = async (req, res) => {
       sendReply(res, "Une erreur s'est produite, réessaie dans un instant.");
     }
   };
+
+  function sendReply(res, text) {
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(text);
+    res.setHeader('Content-Type', 'text/xml');
+    res.status(200).send(twiml.toString());
+  }
